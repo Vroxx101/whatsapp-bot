@@ -5,18 +5,18 @@ const {
     DisconnectReason
 } = require("@whiskeysockets/baileys");
 const { Boom } = require("@hapi/boom");
-const fetch = require("node-fetch"); // ← node-fetch
+const fetch = require("node-fetch"); // ✅ node-fetch v2.6.11 (support require)
 const cheerio = require("cheerio");
 const P = require("pino");
 const qrcode = require("qrcode-terminal");
 
-// === API Key langsung di kode ===
+// === Gunakan API Key langsung (aman karena tidak di .env) ===
 const API_KEY = "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";
 
-// === Cache pencarian resep per user ===
+// === Cache pencarian resep per user (JID) ===
 const userSearchResults = new Map();
 
-// === Cek URL valid ===
+// === Cek apakah string adalah URL valid ===
 function isValidURL(str) {
     try {
         new URL(str);
@@ -26,11 +26,14 @@ function isValidURL(str) {
     }
 }
 
-// === Scrap info dari link ===
+// === Scrap info dari link (judul, deskripsi, gambar) ===
 async function scrapWebsite(url) {
     try {
         const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 10000
         });
         const data = await res.text();
         const $ = cheerio.load(data);
@@ -66,12 +69,16 @@ async function cariresep(query) {
     try {
         const url = `https://cookpad.com/id/search/${encodeURIComponent(query)}`;
         const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 10000
         });
         const data = await res.text();
         const $ = cheerio.load(data);
         const results = [];
 
+        // Ambil daftar resep
         $('div.recipe-preview a').each((i, el) => {
             const $a = $(el);
             const href = $a.attr('href');
@@ -86,21 +93,25 @@ async function cariresep(query) {
             }
         });
 
-        return {
-            success: true,
-            data: results.length > 0 ? results : []
-        };
+        if (results.length === 0) {
+            return { success: false, error: "Tidak ditemukan resep.", data: [] };
+        }
+
+        return { success: true, data: results };
     } catch (error) {
         console.error("Error cariresep:", error.message);
         return { success: false, error: error.message, data: [] };
     }
 }
 
-// === DETAIL RESEP ===
+// === DETAIL RESEP DARI COOKPAD ===
 async function detailresep(url) {
     try {
         const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 10000
         });
         const data = await res.text();
         const $ = cheerio.load(data);
@@ -148,14 +159,18 @@ async function detailresep(url) {
 // === MENU BOT ===
 function getMenu() {
     return `
-🤖 *Vrox-Bot v1.1*
+🤖 *Vrox-Bot v1.2*
 
-🔍 *Fitur:*
-• Kirim link → Dapat info
-• Tanya AI → Jawab pakai LLaMA-3
-• .resepcari [nama] → Cari resep
-• .resepid [nomor] → Lihat detail
-• .menu → Tampilkan ini
+🔍 *Fitur Utama:*
+• Kirim link → Bot ambil judul & deskripsi
+• Tanya apa saja → Jawab pakai AI
+
+🍽️ *Fitur Resep:*
+• _.resepcari [nama]_ → Cari resep (contoh: _.resepcari nasi goreng_)
+• _.resepid [1-10]_ → Lihat detail
+
+📌 *Perintah Lain:*
+• _.menu_ atau _.help_ → Tampilkan menu ini
 
 💬 Dikembangkan oleh Vrox
     `.trim();
@@ -185,10 +200,10 @@ async function startBot() {
             const shouldReconnect = (lastDisconnect?.error instanceof Boom
                 ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
                 : true);
-            console.log("🔌 Terputus:", lastDisconnect?.error?.message);
+            console.log("🔌 Koneksi terputus:", lastDisconnect?.error?.message);
             if (shouldReconnect) startBot();
         } else if (connection === "open") {
-            console.log("✅ Bot aktif!");
+            console.log("✅ Bot aktif dan terhubung!");
         }
     });
 
@@ -202,33 +217,42 @@ async function startBot() {
         const command = args.shift()?.toLowerCase();
 
         if (!text) return;
+        console.log("📨 Pesan masuk:", text);
 
-        // === .menu ===
-        if (command === 'menu') {
+        // === .menu / .help ===
+        if (['menu', 'help'].includes(command)) {
             return await sock.sendMessage(from, { text: getMenu() }, { quoted: msg });
         }
 
         // === .resepcari ===
-        if (command === 'resepcari') {
+        if (['resepcari', 'cariresep'].includes(command)) {
             const query = args.join(' ').trim();
-            if (!query) return await sock.sendMessage(from, {
-                text: "❌ Masukkan nama makanan!\nContoh: .resepcari soto"
-            }, { quoted: msg });
+            if (!query) {
+                return await sock.sendMessage(from, {
+                    text: "❌ Masukkan nama makanan!\nContoh: _.resepcari rendang_"
+                }, { quoted: msg });
+            }
+
+            await sock.sendMessage(from, { react: { text: "🕒", key: msg.key } });
 
             try {
                 const { data: results } = await cariresep(query);
-                if (!results.length) throw new Error();
+                if (!results || results.length === 0) throw new Error("Tidak ditemukan.");
 
                 userSearchResults.set(from, results);
 
-                let reply = `🔍 *Hasil untuk "${query}"*\n\n`;
-                results.forEach((r, i) => reply += `*${i+1}.* ${r.judul}\n`);
-                reply += `\n📌 .resepid [1-${results.length}]`;
+                let reply = `🔍 *Hasil Pencarian untuk "${query}"*\n\n`;
+                results.slice(0, 10).forEach((r, i) => {
+                    reply += `*${i + 1}.* ${r.judul}\n`;
+                });
+                reply += `\n📌 Kirim: _.resepid [1-${results.length}]_ untuk detail.`;
 
                 await sock.sendMessage(from, { text: reply }, { quoted: msg });
-            } catch {
+                await sock.sendMessage(from, { react: { text: "✅", key: msg.key } });
+            } catch (e) {
+                await sock.sendMessage(from, { react: { text: "❌", key: msg.key } });
                 await sock.sendMessage(from, {
-                    text: `❌ Tidak ditemukan resep untuk "${query}".`
+                    text: `❌ Tidak ditemukan resep untuk "${query}". Coba kata lain.`
                 }, { quoted: msg });
             }
             return;
@@ -237,19 +261,39 @@ async function startBot() {
         // === .resepid ===
         if (command === 'resepid') {
             const index = parseInt(args[0]);
-            const results = userSearchResults.get(from);
-            if (!results || !index || index < 1 || index > results.length) {
+            if (isNaN(index) || index < 1) {
                 return await sock.sendMessage(from, {
-                    text: "Gunakan: .resepid [1-10]"
+                    text: "Gunakan: _.resepid [nomor]_ (1-10)"
                 }, { quoted: msg });
             }
 
-            try {
-                const { data: detail } = await detailresep(results[index - 1].link);
-                if (!detail) throw new Error();
+            const results = userSearchResults.get(from);
+            if (!results) {
+                return await sock.sendMessage(from, {
+                    text: "Anda belum mencari resep. Gunakan _.resepcari [nama]_ dulu."
+                }, { quoted: msg });
+            }
 
-                let caption = `*${detail.judul}*\n\n⏱️ ${detail.waktu_masak} | 👥 ${detail.hasil} | ⭐ ${detail.tingkat_kesulitan}\n\n`;
-                caption += `*Bahan:*\n${detail.bahan}\n\n*Langkah:*\n${detail.langkah_langkah}\n\n_Sumber: Cookpad.com_`;
+            const resep = results[index - 1];
+            if (!resep) {
+                return await sock.sendMessage(from, {
+                    text: `Nomor tidak valid. Pilih 1-${results.length}.`
+                }, { quoted: msg });
+            }
+
+            await sock.sendMessage(from, { react: { text: "🕒", key: msg.key } });
+
+            try {
+                const { data: detail } = await detailresep(resep.link);
+                if (!detail) throw new Error("Gagal ambil detail.");
+
+                let caption = `*${detail.judul}*\n\n`;
+                caption += `⏱️ *Waktu:* ${detail.waktu_masak}\n`;
+                caption += `👥 *Porsi:* ${detail.hasil}\n`;
+                caption += `⭐ *Tingkat:* ${detail.tingkat_kesulitan}\n\n`;
+                caption += `*Bahan-bahan:*\n${detail.bahan}\n\n`;
+                caption += `*Langkah-langkah:*\n${detail.langkah_langkah}\n\n`;
+                caption += `_Sumber: Cookpad.com_`;
 
                 if (detail.thumb) {
                     await sock.sendMessage(from, {
@@ -260,10 +304,12 @@ async function startBot() {
                     await sock.sendMessage(from, { text: caption }, { quoted: msg });
                 }
 
+                await sock.sendMessage(from, { react: { text: "✅", key: msg.key } });
                 userSearchResults.delete(from);
             } catch (e) {
+                await sock.sendMessage(from, { react: { text: "❌", key: msg.key } });
                 await sock.sendMessage(from, {
-                    text: `❌ Gagal: ${e.message}`
+                    text: `❌ Gagal ambil detail resep: ${e.message}`
                 }, { quoted: msg });
             }
             return;
@@ -271,12 +317,13 @@ async function startBot() {
 
         // === Preview Link ===
         if (isValidURL(text)) {
+            await sock.sendMessage(from, { react: { text: "🕒", key: msg.key } });
             const info = await scrapWebsite(text);
             if (info) {
-                const reply = `📲 *Info Link:*\n\n` +
-                    `📱 ${info.title}\n` +
-                    `📝 ${info.description}\n` +
-                    `🔗 ${info.link}`;
+                const reply = `📲 *Informasi Link:*\n\n` +
+                    `📱 Judul: ${info.title}\n` +
+                    `📝 Deskripsi: ${info.description}\n` +
+                    `🔗 Link: ${info.link}`;
 
                 if (info.image) {
                     await sock.sendMessage(from, {
@@ -286,6 +333,12 @@ async function startBot() {
                 } else {
                     await sock.sendMessage(from, { text: reply }, { quoted: msg });
                 }
+                await sock.sendMessage(from, { react: { text: "✅", key: msg.key } });
+            } else {
+                await sock.sendMessage(from, { react: { text: "❌", key: msg.key } });
+                await sock.sendMessage(from, {
+                    text: "❌ Tidak bisa ambil info dari link ini."
+                }, { quoted: msg });
             }
             return;
         }
@@ -301,7 +354,7 @@ async function startBot() {
                 body: JSON.stringify({
                     model: "llama3-8b-8192",
                     messages: [
-                        { role: "system", content: "Jawab dalam bahasa Indonesia dengan sopan." },
+                        { role: "system", content: "Jawab dalam bahasa Indonesia dengan sopan dan jelas." },
                         { role: "user", content: text }
                     ],
                     temperature: 0.7
@@ -311,11 +364,12 @@ async function startBot() {
             const json = await res.json();
             const reply = json.choices[0].message.content.trim();
             await sock.sendMessage(from, {
-                text: `🤖 *AI:* ${reply}`
+                text: `🤖 *vrox-Bot:*\n${reply}`
             }, { quoted: msg });
-        } catch (e) {
+        } catch (error) {
+            const errMsg = error.response?.data?.error?.message || error.message;
             await sock.sendMessage(from, {
-                text: "❌ AI error. Coba lagi."
+                text: `❌ Error: ${errMsg}`
             }, { quoted: msg });
         }
     });
