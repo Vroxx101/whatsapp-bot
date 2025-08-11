@@ -5,18 +5,18 @@ const {
     DisconnectReason
 } = require("@whiskeysockets/baileys");
 const { Boom } = require("@hapi/boom");
-const fetch = require("node-fetch"); // ✅ Hanya node-fetch v2
+const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const P = require("pino");
 const qrcode = require("qrcode-terminal");
 
-// === API Key langsung ===
+// === Gunakan API key langsung ===
 const API_KEY = "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";
 
-// === Cache pencarian ===
+// === Cache pencarian resep per user ===
 const userSearchResults = new Map();
 
-// === Cek URL ===
+// === Cek URL valid ===
 function isValidURL(str) {
     try {
         new URL(str);
@@ -26,7 +26,7 @@ function isValidURL(str) {
     }
 }
 
-// === Scrap info dari link ===
+// === Scrap info dari link (judul, deskripsi) ===
 async function scrapWebsite(url) {
     try {
         const res = await fetch(url, {
@@ -51,10 +51,10 @@ async function scrapWebsite(url) {
     }
 }
 
-// === CARI RESEP DI COOKPAD ===
+// === CARI RESEP DI MASAKAPAHARIINI.COM ===
 async function cariresep(query) {
     try {
-        const url = `https://cookpad.com/id/search/${encodeURIComponent(query)}`;
+        const url = `https://www.masakapahariini.com/?s=${encodeURIComponent(query)}`;
         const res = await fetch(url, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             timeout: 10000
@@ -63,26 +63,28 @@ async function cariresep(query) {
         const $ = cheerio.load(data);
         const results = [];
 
-        $('div.recipe-preview a').each((i, el) => {
-            const href = $(el).attr('href');
-            if (!href || !href.includes('/resep')) return;
+        $('.content-card a').each((i, el) => {
+            const $el = $(el);
+            const judul = $el.find('h3').text().trim();
+            const link = $el.attr('href');
+            const thumb = $el.find('img').attr('data-src') || $el.find('img').attr('src');
 
-            const judul = $(el).find('h2').text().trim();
-            const link = 'https://cookpad.com' + href;
-            const thumb = $(el).find('img').attr('src');
-
-            if (judul && link) {
+            if (judul && link && link.includes('https://www.masakapahariini.com/resep/')) {
                 results.push({ judul, link, thumb });
             }
         });
 
-        return { success: true, data: results };
+        if (results.length === 0) {
+            return { success: false, error: "Tidak ada hasil ditemukan.",  [] };
+        }
+
+        return { success: true,  results };
     } catch (error) {
-        return { success: false, error: error.message, data: [] };
+        return { success: false, error: error.message,  [] };
     }
 }
 
-// === DETAIL RESEP ===
+// === DETAIL RESEP DARI MASAKAPAHARIINI.COM ===
 async function detailresep(url) {
     try {
         const res = await fetch(url, {
@@ -93,27 +95,30 @@ async function detailresep(url) {
         const $ = cheerio.load(data);
 
         const judul = $('h1').first().text().trim() || "Tidak diketahui";
-        const waktu = $('th:contains("Waktu")').next().text().trim() || "Tidak diketahui";
-        const hasil = $('th:contains("Porsi")').next().text().trim() || "Tidak diketahui";
-        const tingkat = $('th:contains("Tingkat kesulitan")').next().text().trim() || "Tidak diketahui";
+        const waktu = $('.recipe-meta-time span').text().trim() || "Tidak diketahui";
+        const hasil = $('.recipe-meta-serves span').text().trim() || "Tidak diketahui";
+        const tingkat = $('.recipe-meta-difficulty span').text().trim() || "Tidak diketahui";
 
         const bahan = [];
-        $('#ingredients-list li').each((i, el) => {
+        $('.ingredient-list li').each((i, el) => {
             const text = $(el).text().replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
             if (text) bahan.push(text);
         });
 
         const langkah = [];
-        $('#steps li').each((i, el) => {
+        $('.instruction-list li').each((i, el) => {
             const text = $(el).text().replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
             if (text) langkah.push(`${i + 1}. ${text}`);
         });
 
-        const thumb = $('meta[property="og:image"]').attr('content') || null;
+        const thumb = $('meta[property="og:image"]').attr('content') ||
+            $('.recipe-image img').attr('data-src') ||
+            $('.recipe-image img').attr('src') ||
+            null;
 
         return {
             success: true,
-            data: {
+             {
                 judul,
                 waktu_masak: waktu,
                 hasil,
@@ -125,20 +130,20 @@ async function detailresep(url) {
             }
         };
     } catch (error) {
-        return { success: false, error: error.message, data: null };
+        return { success: false, error: error.message,  null };
     }
 }
 
-// === MENU ===
+// === MENU BOT ===
 function getMenu() {
     return `
 🤖 *Vrox-Bot*
 
 🍽️ Fitur:
-• Kirim link → info
-• .resepcari [nama] → cari resep
-• .resepid [nomor] → detail
-• .menu → bantuan
+• Kirim link → Dapat info
+• .resepcari [nama] → Cari resep
+• .resepid [nomor] → Lihat detail
+• .menu → Tampilkan ini
     `.trim();
 }
 
@@ -184,10 +189,12 @@ async function startBot() {
 
         if (!text) return;
 
+        // === .menu ===
         if (command === 'menu') {
             return await sock.sendMessage(from, { text: getMenu() }, { quoted: msg });
         }
 
+        // === .resepcari ===
         if (command === 'resepcari') {
             const query = args.join(' ').trim();
             if (!query) return await sock.sendMessage(from, {
@@ -213,6 +220,7 @@ async function startBot() {
             return;
         }
 
+        // === .resepid ===
         if (command === 'resepid') {
             const index = parseInt(args[0]);
             const results = userSearchResults.get(from);
@@ -223,11 +231,11 @@ async function startBot() {
             }
 
             try {
-                const { data: detail } = await detailresep(results[index - 1].link);
+                const {  detail } = await detailresep(results[index - 1].link);
                 if (!detail) throw new Error();
 
                 let caption = `*${detail.judul}*\n\n⏱️ ${detail.waktu_masak} | 👥 ${detail.hasil} | ⭐ ${detail.tingkat_kesulitan}\n\n`;
-                caption += `*Bahan:*\n${detail.bahan}\n\n*Langkah:*\n${detail.langkah_langkah}\n\n_Sumber: Cookpad.com_`;
+                caption += `*Bahan:*\n${detail.bahan}\n\n*Langkah:*\n${detail.langkah_langkah}\n\n_Sumber: masakapahariini.com_`;
 
                 if (detail.thumb) {
                     await sock.sendMessage(from, {
@@ -246,6 +254,7 @@ async function startBot() {
             return;
         }
 
+        // === Preview Link ===
         if (isValidURL(text)) {
             const info = await scrapWebsite(text);
             if (info) {
@@ -266,6 +275,7 @@ async function startBot() {
             return;
         }
 
+        // === AI Mode ===
         try {
             const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
